@@ -1,0 +1,11 @@
+{
+  "identifier": "default",
+  "description": "Default capabilities for the desktop pet",
+  "windows": ["main"],
+  "permissions": [
+    "core:default",
+    "core:window:allow-start-dragging",
+    "core:window:allow-close",
+    "core:window:allow-set-size"
+  ]
+}

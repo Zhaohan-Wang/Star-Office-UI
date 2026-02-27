@@ -1,0 +1,563 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <style>
+        * { margin: 0; padding: 0; }
+        html, body {
+            background: transparent;
+            overflow: hidden;
+            width: 100%;
+            height: 100%;
+            user-select: none;
+            -webkit-user-select: none;
+        }
+        canvas { background: transparent !important; }
+        #context-menu {
+            display: none;
+            position: fixed;
+            background: rgba(26, 26, 46, 0.95);
+            border: 2px solid #e94560;
+            border-radius: 6px;
+            padding: 4px 0;
+            z-index: 9999;
+            font-family: monospace;
+            font-size: 13px;
+            min-width: 110px;
+            backdrop-filter: blur(8px);
+        }
+        .menu-item { padding: 8px 16px; color: #eee; cursor: pointer; white-space: nowrap; }
+        .menu-item:hover { background: #e94560; }
+        .menu-sep { height: 1px; background: rgba(233,69,96,0.3); margin: 4px 8px; }
+    </style>
+</head>
+<body>
+    <div id="context-menu">
+        <div class="menu-item" data-action="info">🏷️ Star 桌宠</div>
+        <div class="menu-sep"></div>
+        <div class="menu-item" data-action="quit">❌ 退出</div>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/phaser@3.80.1/dist/phaser.min.js"></script>
+    <script>
+    (async function () {
+
+    /* ================================================================
+       §1  Tauri API
+       ================================================================ */
+    const isTauri   = !!window.__TAURI__;
+    const core      = isTauri ? window.__TAURI__.core   : null;
+    const winApi    = isTauri ? window.__TAURI__.window : null;
+    const dpiApi    = isTauri ? window.__TAURI__.dpi    : null;
+    const appWindow = winApi  ? winApi.getCurrentWindow() : null;
+
+    /* ================================================================
+       §2  Context menu & drag
+       ================================================================ */
+    const ctxMenu = document.getElementById('context-menu');
+    document.addEventListener('contextmenu', e => {
+        e.preventDefault();
+        ctxMenu.style.display = 'block';
+        ctxMenu.style.left = Math.min(e.clientX, innerWidth  - 120) + 'px';
+        ctxMenu.style.top  = Math.min(e.clientY, innerHeight -  80) + 'px';
+    });
+    document.addEventListener('click', e => {
+        if (!e.target.closest('#context-menu')) ctxMenu.style.display = 'none';
+    });
+    document.querySelectorAll('.menu-item').forEach(el => {
+        el.addEventListener('click', () => {
+            ctxMenu.style.display = 'none';
+            if (el.dataset.action === 'quit' && appWindow) appWindow.close();
+        });
+    });
+    document.addEventListener('mousedown', e => {
+        if (e.button === 0 && !e.target.closest('#context-menu') && appWindow)
+            appWindow.startDragging();
+    });
+
+    /* ================================================================
+       §3  Load config from Rust
+       ================================================================ */
+    const defaultCfg = {
+        width: 200, height: 250,
+        character: { x: 100, y: 165, scale: 2.5, depth: 0, wander: 18 },
+        layers: [], sprites: null
+    };
+    let cfg = defaultCfg;
+    if (core) {
+        try { cfg = await core.invoke('load_layers'); }
+        catch (e) { console.warn('load_layers:', e); }
+    }
+    const W  = cfg.width;
+    const H  = cfg.height;
+    const CC = cfg.character;
+
+    if (appWindow && dpiApi) {
+        try { await appWindow.setSize(new dpiApi.LogicalSize(W, H)); }
+        catch (_) {}
+    }
+
+    /* ================================================================
+       §4  State machine definitions
+       ================================================================
+
+       States
+       ──────
+       idle          — 停下 + 无特殊行为
+       move_down     — 向下移动（面朝镜头）
+       move_up       — 向上移动（背对镜头）
+       move_left     — 向左移动
+       move_right    — 向右移动
+       writing       — 特殊：整理文档
+       receiving     — 特殊：收到消息
+       replying      — 特殊：回复消息
+       researching   — 特殊：搜索信息
+       executing     — 特殊：执行任务
+       syncing       — 特殊：同步备份
+       error         — 特殊：出错了
+
+       Transitions
+       ───────────
+       移动中          → move_{方向}（按最大分量决定方向）
+       停下 + idle     → idle
+       停下 + 特殊状态 → 对应特殊动画
+    */
+
+    const CS = {
+        IDLE:        'idle',
+        MOVE_DOWN:   'move_down',
+        MOVE_UP:     'move_up',
+        MOVE_LEFT:   'move_left',
+        MOVE_RIGHT:  'move_right',
+        WRITING:     'writing',
+        RECEIVING:   'receiving',
+        REPLYING:    'replying',
+        RESEARCHING: 'researching',
+        EXECUTING:   'executing',
+        SYNCING:     'syncing',
+        ERROR:       'error'
+    };
+
+    const SPECIAL_STATES = new Set([
+        CS.WRITING, CS.RECEIVING, CS.REPLYING,
+        CS.RESEARCHING, CS.EXECUTING, CS.SYNCING, CS.ERROR
+    ]);
+
+    const SERVER_TO_CS = {
+        writing:     CS.WRITING,
+        receiving:   CS.RECEIVING,
+        replying:    CS.REPLYING,
+        researching: CS.RESEARCHING,
+        executing:   CS.EXECUTING,
+        syncing:     CS.SYNCING,
+        error:       CS.ERROR
+    };
+
+    const NORM = {
+        working: 'writing', run: 'executing', running: 'executing',
+        sync: 'syncing', research: 'researching'
+    };
+
+    const MOVE_SPEED     = 0.8;
+    const MOVE_THRESHOLD = 2;
+
+    const WANDER_CHANCE = {
+        idle: 0.006, writing: 0.001, receiving: 0.002,
+        replying: 0.001, researching: 0.002, executing: 0.003,
+        syncing: 0.001, error: 0.001
+    };
+
+    let charState   = CS.IDLE;
+    let serverState = 'idle';
+    let facing      = 'down';
+
+    function resolveCharState(dx, dy) {
+        const absDx = Math.abs(dx);
+        const absDy = Math.abs(dy);
+        const moving = absDx > MOVE_THRESHOLD || absDy > MOVE_THRESHOLD;
+
+        if (moving) {
+            if (absDx >= absDy) {
+                facing = dx > 0 ? 'right' : 'left';
+                return dx > 0 ? CS.MOVE_RIGHT : CS.MOVE_LEFT;
+            }
+            facing = dy > 0 ? 'down' : 'up';
+            return dy > 0 ? CS.MOVE_DOWN : CS.MOVE_UP;
+        }
+
+        return SERVER_TO_CS[serverState] || CS.IDLE;
+    }
+
+    /* ================================================================
+       §5  Bubble & emoji config
+       ================================================================ */
+    const BUBBLE = {
+        idle:        ['摸鱼中…','有没有新任务？','咖啡真好喝☕','伸个懒腰~'],
+        writing:     ['这个要记下来','写得手酸','再检查一遍✍️'],
+        receiving:   ['有人找我！','看看是什么','来消息了📨'],
+        replying:    ['让我想想…','打字中…','这样回好了💬'],
+        researching: ['让我搜一下🔍','找到线索了','再深挖一点'],
+        executing:   ['冲鸭！🦆','加油加油','马上搞定⚡'],
+        syncing:     ['备份备份☁️','安全第一','同步中…'],
+        error:       ['啊哦…','出问题了❗','马上修好🔧']
+    };
+    const EMOJI = {
+        idle:'💤', writing:'✏️', receiving:'📨', replying:'💬',
+        researching:'🔍', executing:'⚡', syncing:'☁️', error:'❗'
+    };
+
+    /* ================================================================
+       §6  Game globals
+       ================================================================ */
+    let game, star, stateEmoji, shadow;
+    let targetX = CC.x, targetY = CC.y;
+    let lastFetch = 0, nextBubbleAt = 5000;
+    let bubble = null;
+    const loadedAnims = new Set();
+
+    /* ================================================================
+       §7  Phaser game
+       ================================================================ */
+    new Phaser.Game({
+        type: Phaser.AUTO,
+        width: W, height: H,
+        transparent: true,
+        pixelArt: true,
+        physics: { default: 'arcade', arcade: { gravity: { y: 0 }, debug: false } },
+        scene: { preload: preloadScene, create: createScene, update: updateScene }
+    });
+
+    /* ────────── preload ────────── */
+    function preloadScene() {
+        cfg.layers.forEach((l, i) => this.load.image('layer_' + i, l.data_url));
+
+        if (cfg.sprites) {
+            const fw = cfg.sprites.frame_width;
+            const fh = cfg.sprites.frame_height;
+            cfg.sprites.anims.forEach(a => {
+                this.load.spritesheet('sheet_' + a.key, a.data_url, {
+                    frameWidth: fw, frameHeight: fh
+                });
+            });
+        }
+    }
+
+    /* ────────── create ────────── */
+    function createScene() {
+        game = this;
+
+        /* background layers */
+        cfg.layers.forEach((l, i) => {
+            game.add.image(l.x, l.y, 'layer_' + i)
+                .setScale(l.scale).setAlpha(l.alpha).setDepth(l.depth);
+        });
+
+        /* sprite-sheet animations (user-provided) */
+        if (cfg.sprites) {
+            cfg.sprites.anims.forEach(a => {
+                game.anims.create({
+                    key: a.key,
+                    frames: game.anims.generateFrameNumbers('sheet_' + a.key, {
+                        start: 0, end: a.frames - 1
+                    }),
+                    frameRate: a.rate,
+                    repeat: a.repeat
+                });
+                loadedAnims.add(a.key);
+            });
+        }
+
+        /* fallback programmatic textures & animations */
+        buildFallbackTextures();
+        buildFallbackAnims();
+
+        /* shadow */
+        shadow = game.add.ellipse(CC.x, CC.y + 42, 55, 14, 0x000000, 0.15)
+            .setDepth(CC.depth - 1);
+
+        /* character sprite */
+        star = game.physics.add.sprite(CC.x, CC.y, 'fb_front_0')
+            .setOrigin(0.5).setScale(CC.scale).setDepth(CC.depth);
+        star.play(CS.IDLE);
+
+        /* state emoji */
+        stateEmoji = game.add.text(CC.x + 32, CC.y - 32, '💤',
+            { font: '16px sans-serif' }).setOrigin(0.5).setDepth(CC.depth + 50);
+
+        fetchState();
+    }
+
+    /* ────────── update ────────── */
+    function updateScene(time) {
+        /* poll server state */
+        if (time - lastFetch > 2000) { fetchState(); lastFetch = time; }
+
+        /* wander */
+        const wc = WANDER_CHANCE[serverState] || 0.003;
+        if (Math.random() < wc) {
+            targetX = CC.x + (Math.random() - 0.5) * CC.wander * 2;
+            targetY = CC.y + (Math.random() - 0.5) * CC.wander * 2;
+        }
+
+        /* move toward target */
+        const dx = targetX - star.x;
+        const dy = targetY - star.y;
+        if (Math.abs(dx) > MOVE_THRESHOLD) star.x += Math.sign(dx) * MOVE_SPEED;
+        if (Math.abs(dy) > MOVE_THRESHOLD) star.y += Math.sign(dy) * MOVE_SPEED;
+
+        /* walk wobble */
+        const isMoving = Math.abs(dx) > MOVE_THRESHOLD || Math.abs(dy) > MOVE_THRESHOLD;
+        if (isMoving) star.y += Math.sin(time / 150) * 0.3;
+
+        /* ── state machine transition ── */
+        const next = resolveCharState(dx, dy);
+        if (next !== charState) {
+            charState = next;
+            star.play(charState, true);
+        }
+
+        /* track shadow, emoji, bubble */
+        shadow.setPosition(star.x, star.y + 42);
+        stateEmoji.setPosition(star.x + 32, star.y - 32);
+        if (bubble) bubble.setPosition(star.x, star.y - 60);
+
+        /* speech bubble */
+        if (time > nextBubbleAt) {
+            showBubble();
+            nextBubbleAt = time + 6000 + Math.random() * 4000;
+        }
+    }
+
+    /* ================================================================
+       §8  Fallback texture generation (四方向 + 各状态)
+       ================================================================
+
+       When no sprite sheet is provided for a state, the system uses
+       these programmatically drawn 32×32 textures.
+
+       Directions:
+         front — 两眼 + 嘴（move_down / idle / 特殊行为默认朝向）
+         back  — 后脑勺，无五官（move_up）
+         left  — 左侧面，单眼（move_left）
+         right — 右侧面，单眼（move_right）
+
+       Each direction has a base frame and a walk frame (with feet).
+       Front also has an eyes-closed frame for blink effects.
+    */
+
+    function tex(key, fn) {
+        const g = game.make.graphics();
+        fn(g);
+        g.generateTexture(key, 32, 32);
+        g.destroy();
+    }
+
+    function buildFallbackTextures() {
+        /* ── front ── */
+        tex('fb_front_0', g => drawBody(g, 'front', true));
+        tex('fb_front_1', g => drawBody(g, 'front', false));
+        tex('fb_front_w0', g => { drawBody(g, 'front', true); drawFeet(g, 'front', 0); });
+        tex('fb_front_w1', g => { drawBody(g, 'front', true); drawFeet(g, 'front', 1); });
+
+        /* ── back ── */
+        tex('fb_back_0', g => drawBody(g, 'back'));
+        tex('fb_back_w0', g => { drawBody(g, 'back'); drawFeet(g, 'vert', 0); });
+        tex('fb_back_w1', g => { drawBody(g, 'back'); drawFeet(g, 'vert', 1); });
+
+        /* ── left ── */
+        tex('fb_left_0', g => drawBody(g, 'left', true));
+        tex('fb_left_w0', g => { drawBody(g, 'left', true); drawFeet(g, 'left', 0); });
+        tex('fb_left_w1', g => { drawBody(g, 'left', true); drawFeet(g, 'left', 1); });
+
+        /* ── right ── */
+        tex('fb_right_0', g => drawBody(g, 'right', true));
+        tex('fb_right_w0', g => { drawBody(g, 'right', true); drawFeet(g, 'right', 0); });
+        tex('fb_right_w1', g => { drawBody(g, 'right', true); drawFeet(g, 'right', 1); });
+    }
+
+    /* ── draw body for a direction ── */
+    function drawBody(g, dir, eyesOpen) {
+        /* body */
+        g.fillStyle(0xff6b35);
+        g.fillRect(4, 4, 24, 24);
+        /* top highlight */
+        g.fillStyle(0xffb347);
+        g.fillRect(6, 6, 20, 2);
+
+        switch (dir) {
+        case 'front':
+            if (eyesOpen) {
+                /* whites */
+                g.fillStyle(0xffffff);
+                g.fillRect(9, 11, 6, 6);
+                g.fillRect(17, 11, 6, 6);
+                /* pupils */
+                g.fillStyle(0x222222);
+                g.fillRect(12, 13, 3, 3);
+                g.fillRect(20, 13, 3, 3);
+                /* pupil highlight */
+                g.fillStyle(0xffffff);
+                g.fillRect(12, 13, 1, 1);
+                g.fillRect(20, 13, 1, 1);
+            } else {
+                g.fillStyle(0x222222);
+                g.fillRect(9, 14, 6, 2);
+                g.fillRect(17, 14, 6, 2);
+            }
+            /* mouth */
+            g.fillStyle(0xff8c69);
+            g.fillRect(13, 21, 6, 3);
+            break;
+
+        case 'back':
+            /* back-of-head detail (hair/collar) */
+            g.fillStyle(0xcc5522);
+            g.fillRect(10, 9, 12, 3);
+            g.fillRect(12, 22, 8, 2);
+            break;
+
+        case 'left':
+            if (eyesOpen) {
+                g.fillStyle(0xffffff);
+                g.fillRect(7, 11, 6, 6);
+                g.fillStyle(0x222222);
+                g.fillRect(8, 13, 3, 3);
+                g.fillStyle(0xffffff);
+                g.fillRect(8, 13, 1, 1);
+            } else {
+                g.fillStyle(0x222222);
+                g.fillRect(7, 14, 6, 2);
+            }
+            g.fillStyle(0xff8c69);
+            g.fillRect(5, 21, 5, 3);
+            break;
+
+        case 'right':
+            if (eyesOpen) {
+                g.fillStyle(0xffffff);
+                g.fillRect(19, 11, 6, 6);
+                g.fillStyle(0x222222);
+                g.fillRect(21, 13, 3, 3);
+                g.fillStyle(0xffffff);
+                g.fillRect(21, 13, 1, 1);
+            } else {
+                g.fillStyle(0x222222);
+                g.fillRect(19, 14, 6, 2);
+            }
+            g.fillStyle(0xff8c69);
+            g.fillRect(22, 21, 5, 3);
+            break;
+        }
+    }
+
+    /* ── draw feet for walk cycle ── */
+    function drawFeet(g, dir, frame) {
+        g.fillStyle(0xcc5522);
+        switch (dir) {
+        case 'front': case 'vert':
+            if (frame === 0) { g.fillRect(8, 27, 5, 3); }
+            else              { g.fillRect(19, 27, 5, 3); }
+            break;
+        case 'left':
+            if (frame === 0) { g.fillRect(4, 27, 5, 3); }
+            else              { g.fillRect(12, 27, 5, 3); }
+            break;
+        case 'right':
+            if (frame === 0) { g.fillRect(15, 27, 5, 3); }
+            else              { g.fillRect(23, 27, 5, 3); }
+            break;
+        }
+    }
+
+    /* ================================================================
+       §9  Fallback animation definitions
+       ================================================================
+
+       For each charState that lacks a user-provided sprite sheet,
+       create a Phaser animation from the fallback textures.
+    */
+    function buildFallbackAnims() {
+        const defs = {
+            /* ── idle: blink cycle ── */
+            [CS.IDLE]: {
+                frames: ['fb_front_0','fb_front_0','fb_front_0',
+                         'fb_front_0','fb_front_0','fb_front_1'],
+                rate: 2
+            },
+            /* ── movement: walk cycle ── */
+            [CS.MOVE_DOWN]:  { frames: ['fb_front_w0','fb_front_0','fb_front_w1','fb_front_0'], rate: 6 },
+            [CS.MOVE_UP]:    { frames: ['fb_back_w0','fb_back_0','fb_back_w1','fb_back_0'],     rate: 6 },
+            [CS.MOVE_LEFT]:  { frames: ['fb_left_w0','fb_left_0','fb_left_w1','fb_left_0'],     rate: 6 },
+            [CS.MOVE_RIGHT]: { frames: ['fb_right_w0','fb_right_0','fb_right_w1','fb_right_0'], rate: 6 },
+            /* ── special behaviors: front-facing with characteristic rhythm ── */
+            [CS.WRITING]:     { frames: ['fb_front_0','fb_front_0','fb_front_1','fb_front_0'], rate: 2 },
+            [CS.RECEIVING]:   { frames: ['fb_front_0','fb_front_1','fb_front_0','fb_front_1'], rate: 3 },
+            [CS.REPLYING]:    { frames: ['fb_front_0','fb_front_0','fb_front_0','fb_front_1'], rate: 2 },
+            [CS.RESEARCHING]: { frames: ['fb_front_0','fb_front_0','fb_front_1','fb_front_0'], rate: 1.5 },
+            [CS.EXECUTING]:   { frames: ['fb_front_0','fb_front_1','fb_front_0','fb_front_1'], rate: 4 },
+            [CS.SYNCING]:     { frames: ['fb_front_0','fb_front_0','fb_front_0','fb_front_1'], rate: 1 },
+            [CS.ERROR]:       { frames: ['fb_front_1','fb_front_0','fb_front_1','fb_front_1'], rate: 2 },
+        };
+
+        Object.entries(defs).forEach(([key, d]) => {
+            if (loadedAnims.has(key)) return;
+            game.anims.create({
+                key,
+                frames: d.frames.map(f => ({ key: f })),
+                frameRate: d.rate,
+                repeat: -1
+            });
+        });
+    }
+
+    /* ================================================================
+       §10  Server state polling
+       ================================================================ */
+    async function fetchState() {
+        if (!core) return;
+        try {
+            const data = await core.invoke('read_state');
+            const raw = NORM[data.state] || data.state || 'idle';
+            serverState = SERVER_TO_CS[raw] ? raw : 'idle';
+            const emoji = EMOJI[serverState] || '💤';
+            if (stateEmoji) stateEmoji.setText(emoji);
+        } catch (_) {}
+    }
+
+    /* ================================================================
+       §11  Speech bubble
+       ================================================================ */
+    function showBubble() {
+        if (bubble) { bubble.destroy(); bubble = null; }
+        const pool = BUBBLE[serverState] || BUBBLE.idle;
+        const text = pool[Math.floor(Math.random() * pool.length)];
+
+        const txt = game.add.text(0, 0, text, {
+            font: '12px monospace', fill: '#333', align: 'center'
+        }).setOrigin(0.5);
+
+        const pad = 10;
+        const bw = txt.width + pad * 2;
+        const bh = txt.height + pad;
+        const bg = game.add.rectangle(0, 0, bw, bh, 0xffffff, 0.93)
+            .setStrokeStyle(2, 0x555555);
+        const tail = game.add.triangle(0, bh / 2 + 4, -4, 0, 4, 0, 0, 7, 0xffffff, 0.93);
+
+        bubble = game.add.container(star.x, star.y - 60, [bg, tail, txt])
+            .setDepth(CC.depth + 100).setAlpha(0);
+
+        game.tweens.add({ targets: bubble, alpha: 1, duration: 200 });
+
+        game.time.delayedCall(3500, () => {
+            if (!bubble) return;
+            game.tweens.add({
+                targets: bubble, alpha: 0, duration: 300,
+                onComplete: () => { if (bubble) { bubble.destroy(); bubble = null; } }
+            });
+        });
+    }
+
+    })();
+    </script>
+</body>
+</html>

@@ -1,0 +1,42 @@
+{
+  "width": 260,
+  "height": 280,
+  "character": {
+    "x": 130,
+    "y": 170,
+    "scale": 2.5,
+    "depth": 0,
+    "wander": 20
+  },
+  "layers": [
+    {
+      "image": "cloud.png",
+      "x": 55,
+      "y": 35,
+      "depth": -10,
+      "scale": 1.0,
+      "alpha": 0.6
+    },
+    {
+      "image": "cloud.png",
+      "x": 200,
+      "y": 55,
+      "depth": -10,
+      "scale": 0.7,
+      "alpha": 0.4
+    },
+    {
+      "image": "platform.png",
+      "x": 130,
+      "y": 215,
+      "depth": -1,
+      "scale": 1.0,
+      "alpha": 1.0
+    }
+  ],
+  "sprites": {
+    "frame_width": 32,
+    "frame_height": 32,
+    "anims": {}
+  }
+}

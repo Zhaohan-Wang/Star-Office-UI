@@ -16,3 +16,8 @@ state.json
 cloudflared.pid
 cloudflared.out
 frontend/office_bg.png
+
+# Desktop pet (Tauri)
+desktop-pet/node_modules/
+desktop-pet/src-tauri/target/
+desktop-pet/package-lock.json
