@@ -83,6 +83,13 @@ You’ll get a `https://xxx.trycloudflare.com` URL.
 - Don’t put sensitive info in `detail`.
 - If needed, add a token check for `/status` (or only return coarse states).
 
+## Acknowledgments / 鸣谢
+
+部分素材来自以下创作者，在此致谢：
+
+- **[Cozy Interior Asset Pack](https://shubibubi.itch.io/cozy-interior)** — shubibubi（室内/地图素材）
+- **[Pixel Art App Icons](https://reffpixels.itch.io/appicons)** — Reff Pixels（状态图标等 24×24 像素图标）
+
 ## License
 
 MIT
