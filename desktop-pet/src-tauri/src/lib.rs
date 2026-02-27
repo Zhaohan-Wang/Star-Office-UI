@@ -66,7 +66,31 @@ fn neg_one() -> i32 {
     -1
 }
 
-// ── IPC response ──
+// ── map.json input ──
+
+#[derive(Debug, Deserialize)]
+struct MapCfgFile {
+    tile_size: Option<u32>,
+    cols: Option<u32>,
+    rows: Option<u32>,
+    zoom: Option<u32>,
+    tileset: String,
+    character_speed: Option<f64>,
+    ground: Vec<Vec<i32>>,
+    border: Option<Vec<Vec<i32>>>,
+    rug: Option<Vec<Vec<i32>>>,
+    objects: Vec<Vec<i32>>,
+    collision: Vec<Vec<u8>>,
+    pois: Option<HashMap<String, PoiCfg>>,
+}
+
+#[derive(Debug, Deserialize)]
+struct PoiCfg {
+    col: u32,
+    row: u32,
+}
+
+// ── IPC responses ──
 
 #[derive(Debug, Serialize)]
 struct FullData {
@@ -112,21 +136,34 @@ struct AnimItem {
     repeat: i32,
 }
 
-// ── app state ──
+#[derive(Debug, Serialize)]
+struct MapData {
+    tile_size: u32,
+    cols: u32,
+    rows: u32,
+    zoom: u32,
+    tileset_url: String,
+    tileset_cols: u32,
+    character_speed: f64,
+    ground: Vec<Vec<i32>>,
+    border: Vec<Vec<i32>>,
+    rug: Vec<Vec<i32>>,
+    objects: Vec<Vec<i32>>,
+    collision: Vec<Vec<u8>>,
+    pois: HashMap<String, PoiOut>,
+}
+
+#[derive(Debug, Serialize)]
+struct PoiOut {
+    col: u32,
+    row: u32,
+}
+
+// ── shared ──
 
 struct AppPaths {
     state_path: PathBuf,
     layers_dir: PathBuf,
-}
-
-// ── commands ──
-
-#[tauri::command]
-fn read_state(paths: tauri::State<'_, Mutex<AppPaths>>) -> Result<PetState, String> {
-    let p = paths.lock().map_err(|e| e.to_string())?;
-    let raw = fs::read_to_string(&p.state_path)
-        .map_err(|e| format!("{}: {e}", p.state_path.display()))?;
-    serde_json::from_str(&raw).map_err(|e| format!("parse: {e}"))
 }
 
 fn encode_image(path: &PathBuf) -> Result<String, String> {
@@ -143,6 +180,16 @@ fn encode_image(path: &PathBuf) -> Result<String, String> {
         _ => "image/png",
     };
     Ok(format!("data:{mime};base64,{}", B64.encode(&bytes)))
+}
+
+// ── commands ──
+
+#[tauri::command]
+fn read_state(paths: tauri::State<'_, Mutex<AppPaths>>) -> Result<PetState, String> {
+    let p = paths.lock().map_err(|e| e.to_string())?;
+    let raw = fs::read_to_string(&p.state_path)
+        .map_err(|e| format!("{}: {e}", p.state_path.display()))?;
+    serde_json::from_str(&raw).map_err(|e| format!("parse: {e}"))
 }
 
 #[tauri::command]
@@ -165,13 +212,8 @@ fn load_layers(paths: tauri::State<'_, Mutex<AppPaths>>) -> Result<FullData, Str
 
     let w = cfg.width.unwrap_or(200);
     let h = cfg.height.unwrap_or(250);
-
     let cc = cfg.character.unwrap_or(CharCfg {
-        x: None,
-        y: None,
-        scale: None,
-        depth: None,
-        wander: None,
+        x: None, y: None, scale: None, depth: None, wander: None,
     });
     let character = CharData {
         x: cc.x.unwrap_or(w as f64 / 2.0),
@@ -181,15 +223,13 @@ fn load_layers(paths: tauri::State<'_, Mutex<AppPaths>>) -> Result<FullData, Str
         wander: cc.wander.unwrap_or(18.0),
     };
 
-    // layers
-    let mut layer_items = Vec::new();
+    let mut items = Vec::new();
     for entry in cfg.layers.unwrap_or_default() {
         let img_path = p.layers_dir.join(&entry.image);
         if !img_path.exists() {
-            eprintln!("⚠️  Layer not found: {}", img_path.display());
             continue;
         }
-        layer_items.push(LayerItem {
+        items.push(LayerItem {
             data_url: encode_image(&img_path)?,
             x: entry.x.unwrap_or(w as f64 / 2.0),
             y: entry.y.unwrap_or(h as f64 / 2.0),
@@ -199,16 +239,13 @@ fn load_layers(paths: tauri::State<'_, Mutex<AppPaths>>) -> Result<FullData, Str
         });
     }
 
-    // sprites
     let sprites_data = if let Some(scfg) = cfg.sprites {
         let fw = scfg.frame_width.unwrap_or(32);
         let fh = scfg.frame_height.unwrap_or(32);
         let mut anims = Vec::new();
-
         for (key, acfg) in scfg.anims.unwrap_or_default() {
             let img_path = p.layers_dir.join(&acfg.file);
             if !img_path.exists() {
-                eprintln!("⚠️  Sprite not found: {}", img_path.display());
                 continue;
             }
             anims.push(AnimItem {
@@ -219,7 +256,6 @@ fn load_layers(paths: tauri::State<'_, Mutex<AppPaths>>) -> Result<FullData, Str
                 repeat: acfg.repeat,
             });
         }
-
         Some(SpritesData {
             frame_width: fw,
             frame_height: fh,
@@ -233,9 +269,64 @@ fn load_layers(paths: tauri::State<'_, Mutex<AppPaths>>) -> Result<FullData, Str
         width: w,
         height: h,
         character,
-        layers: layer_items,
+        layers: items,
         sprites: sprites_data,
     })
+}
+
+#[tauri::command]
+fn load_map(paths: tauri::State<'_, Mutex<AppPaths>>) -> Result<MapData, String> {
+    let p = paths.lock().map_err(|e| e.to_string())?;
+    let map_path = p.layers_dir.join("map.json");
+
+    if !map_path.exists() {
+        return Err("map.json not found".into());
+    }
+
+    let raw = fs::read_to_string(&map_path).map_err(|e| format!("map.json: {e}"))?;
+    let cfg: MapCfgFile = serde_json::from_str(&raw).map_err(|e| format!("map.json: {e}"))?;
+
+    let ts = cfg.tile_size.unwrap_or(16);
+    let cols = cfg.cols.unwrap_or(cfg.ground.first().map_or(12, |r| r.len() as u32));
+    let rows = cfg.rows.unwrap_or(cfg.ground.len() as u32);
+
+    let tileset_path = p.layers_dir.join(&cfg.tileset);
+    if !tileset_path.exists() {
+        return Err(format!("tileset not found: {}", cfg.tileset));
+    }
+    let tileset_url = encode_image(&tileset_path)?;
+
+    // figure out tileset column count from image width
+    let img_bytes = fs::read(&tileset_path).map_err(|e| e.to_string())?;
+    let tileset_cols = png_width(&img_bytes).unwrap_or(160) / ts;
+
+    let mut pois = HashMap::new();
+    for (k, v) in cfg.pois.unwrap_or_default() {
+        pois.insert(k, PoiOut { col: v.col, row: v.row });
+    }
+
+    Ok(MapData {
+        tile_size: ts,
+        cols,
+        rows,
+        zoom: cfg.zoom.unwrap_or(2),
+        tileset_url,
+        tileset_cols,
+        character_speed: cfg.character_speed.unwrap_or(2.5),
+        ground: cfg.ground,
+        border: cfg.border.unwrap_or_default(),
+        rug: cfg.rug.unwrap_or_default(),
+        objects: cfg.objects,
+        collision: cfg.collision,
+        pois,
+    })
+}
+
+fn png_width(data: &[u8]) -> Option<u32> {
+    if data.len() < 24 || &data[0..4] != b"\x89PNG" {
+        return None;
+    }
+    Some(u32::from_be_bytes([data[16], data[17], data[18], data[19]]))
 }
 
 // ── bootstrap ──
@@ -267,7 +358,7 @@ pub fn run() {
             state_path: root.join("state.json"),
             layers_dir: root.join("layers"),
         }))
-        .invoke_handler(tauri::generate_handler![read_state, load_layers])
+        .invoke_handler(tauri::generate_handler![read_state, load_layers, load_map])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
