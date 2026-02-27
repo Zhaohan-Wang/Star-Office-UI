@@ -6,10 +6,16 @@ from datetime import datetime
 import json
 import os
 
-# Paths
-ROOT_DIR = "/root/.openclaw/workspace/star-office-ui"
+# Paths – default to the project root (one level up from backend/)
+ROOT_DIR = os.environ.get(
+    "STAR_OFFICE_ROOT",
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+)
 FRONTEND_DIR = os.path.join(ROOT_DIR, "frontend")
-STATE_FILE = os.path.join(ROOT_DIR, "state.json")
+STATE_FILE = os.environ.get(
+    "STAR_OFFICE_STATE_FILE",
+    os.path.join(ROOT_DIR, "state.json"),
+)
 
 app = Flask(__name__, static_folder=FRONTEND_DIR, static_url_path="/static")
 
@@ -47,7 +53,7 @@ def load_state():
         ttl = int(state.get("ttl_seconds", 25))
         updated_at = state.get("updated_at")
         s = state.get("state", "idle")
-        working_states = {"writing", "researching", "executing"}
+        working_states = {"writing", "researching", "executing", "receiving", "replying"}
         if updated_at and s in working_states:
             # tolerate both with/without timezone
             dt = datetime.fromisoformat(updated_at.replace("Z", "+00:00"))

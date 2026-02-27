@@ -52,6 +52,8 @@
         const STATES = {
             idle: { name: '待命', area: 'breakroom' },
             writing: { name: '整理文档', area: 'workdesk' },
+            receiving: { name: '收到消息', area: 'workdesk' },
+            replying: { name: '回复消息', area: 'workdesk' },
             researching: { name: '搜索信息', area: 'workdesk' },
             executing: { name: '执行任务', area: 'workdesk' },
             syncing: { name: '同步备份', area: 'breakroom' },
@@ -61,6 +63,8 @@
         const BUBBLE_TEXTS = {
             idle: ['摸鱼中…', '有没有新任务？', '咖啡真好喝', '伸个懒腰'],
             writing: ['这个要记下来', '写得手酸', '再检查一遍', '好记性不如烂笔头'],
+            receiving: ['有人找我！', '看看是什么', '来消息了', '马上看'],
+            replying: ['让我想想…', '打字中…', '这样回好了', '组织一下语言'],
             researching: ['让我搜一下', '找到线索了', '这个有意思', '再深挖一点'],
             executing: ['冲鸭！', '这个简单', '加油加油', '马上搞定'],
             syncing: ['备份备份', '安全第一', '同步中…', '云端见'],
