@@ -60,5 +60,12 @@
     "executing":   { "col": 5, "row": 5 },
     "syncing":     { "col": 6, "row": 4 },
     "error":       { "col": 7, "row": 5 }
+  },
+
+  "state_icons": {
+    "writing":      "Microsoft Word.png",
+    "receiving":    "Google Hangouts.png",
+    "replying":     "Glovo.png",
+    "researching":  "Google.png"
   }
 }

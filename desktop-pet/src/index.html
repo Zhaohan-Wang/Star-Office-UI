@@ -238,7 +238,7 @@
     /* ================================================================
        §6  Game globals
        ================================================================ */
-    let game, star, stateEmoji, shadow;
+    let game, star, stateEmoji, stateIcon, shadow;
     let serverState = 'idle';
     let charAnim    = 'idle';
     let charGridR, charGridC;
@@ -276,6 +276,11 @@
         this.load.spritesheet('tiles', map.tileset_url, {
             frameWidth: T, frameHeight: T
         });
+        if (map.state_icons && typeof map.state_icons === 'object') {
+            for (const [state, dataUrl] of Object.entries(map.state_icons)) {
+                if (dataUrl) this.load.image('icon_' + state, dataUrl);
+            }
+        }
     }
 
     /* ────────── create ────────── */
@@ -330,10 +335,21 @@
         star = game.add.sprite(sx, sy, 'cf0').setDepth(charGridR * 10 + 1);
         star.play('idle');
 
-        /* state emoji */
+        /* state indicator: icon (from state_icons) or emoji fallback */
         stateEmoji = game.add.text(sx + T * 0.6, sy - T * 0.7, '💤', {
             font: `${Math.round(T * 0.55)}px sans-serif`
         }).setOrigin(0.5).setDepth(9000);
+
+        const iconScale = (T * 1.1) / 24;
+        const firstIconKey = map.state_icons && Object.keys(map.state_icons)[0];
+        if (firstIconKey && game.textures.exists('icon_' + firstIconKey)) {
+            stateIcon = game.add.sprite(sx + T * 0.6, sy - T * 0.7, 'icon_' + firstIconKey)
+                .setOrigin(0.5).setDepth(9000).setScale(iconScale);
+            stateIcon.setData('baseScale', iconScale);
+            stateIcon.setVisible(false);
+        } else {
+            stateIcon = null;
+        }
 
         fetchState();
     }
@@ -383,9 +399,18 @@
         /* walk wobble */
         const wobble = path ? Math.sin(time / 120) * 0.4 : 0;
 
-        /* track shadow, emoji, bubble */
+        /* track shadow, state icon / emoji (follow + pulse), bubble */
         shadow.setPosition(star.x, star.y + T * 0.55 + wobble * 0.3);
-        stateEmoji.setPosition(star.x + T * 0.6, star.y - T * 0.7);
+        const stateX = star.x + T * 0.6;
+        const stateY = star.y - T * 0.7 + (path ? wobble * 0.25 : 0);
+        const pulse = 1 + 0.12 * Math.sin(time / 180);
+        stateEmoji.setPosition(stateX, stateY);
+        stateEmoji.setScale(pulse);
+        if (stateIcon) {
+            stateIcon.setPosition(stateX, stateY);
+            const baseScale = stateIcon.getData('baseScale') || (T * 1.1) / 24;
+            stateIcon.setScale(baseScale * pulse);
+        }
         updateBubblePos();
 
         /* bubble */
@@ -435,7 +460,15 @@
 
             if (serverState !== prevServerState) {
                 prevServerState = serverState;
-                stateEmoji.setText(EMOJI[serverState] || '💤');
+                const iconKey = 'icon_' + serverState;
+                if (stateIcon && game.textures.exists(iconKey)) {
+                    stateIcon.setTexture(iconKey).setVisible(true);
+                    stateEmoji.setVisible(false);
+                } else {
+                    if (stateIcon) stateIcon.setVisible(false);
+                    stateEmoji.setVisible(true);
+                    stateEmoji.setText(EMOJI[serverState] || '💤');
+                }
                 const poi = map.pois[serverState];
                 if (poi) navigateTo(poi.row, poi.col);
             }

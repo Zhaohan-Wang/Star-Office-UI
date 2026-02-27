@@ -82,6 +82,7 @@ struct MapCfgFile {
     objects: Vec<Vec<i32>>,
     collision: Vec<Vec<u8>>,
     pois: Option<HashMap<String, PoiCfg>>,
+    state_icons: Option<HashMap<String, String>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -151,6 +152,7 @@ struct MapData {
     objects: Vec<Vec<i32>>,
     collision: Vec<Vec<u8>>,
     pois: HashMap<String, PoiOut>,
+    state_icons: HashMap<String, String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -305,6 +307,17 @@ fn load_map(paths: tauri::State<'_, Mutex<AppPaths>>) -> Result<MapData, String>
         pois.insert(k, PoiOut { col: v.col, row: v.row });
     }
 
+    let icons_dir = p.layers_dir.join("Small (24x24) PNG");
+    let mut state_icons = HashMap::new();
+    for (state, filename) in cfg.state_icons.unwrap_or_default() {
+        let path = icons_dir.join(&filename);
+        if path.exists() {
+            if let Ok(url) = encode_image(&path) {
+                state_icons.insert(state, url);
+            }
+        }
+    }
+
     Ok(MapData {
         tile_size: ts,
         cols,
@@ -319,6 +332,7 @@ fn load_map(paths: tauri::State<'_, Mutex<AppPaths>>) -> Result<MapData, String>
         objects: cfg.objects,
         collision: cfg.collision,
         pois,
+        state_icons,
     })
 }
 
